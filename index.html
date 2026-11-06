@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>인베이더</title>
+<title>외계인침공</title>
 <style>
   html,body{margin:0;height:100%;background:#000;overflow:hidden;color:#fff;
     font-family:"Courier New",Consolas,monospace;touch-action:none;user-select:none;-webkit-user-select:none}
@@ -580,7 +580,7 @@ function drawGame() {
 function drawTitle() {
   const fr = Math.abs(Math.floor(time * 2)) % 2;
   const blink = fr === 0;
-  text('인베이더', W / 2, 170, 72, '#39ff14');
+  text('외계인침공', W / 2, 170, 72, '#39ff14');
   text('INVADERS', W / 2, 228, 22, '#4fd8ff');
   const rows = [
     { img: SPR_UFO.frames[0], label: '= ? 미스터리', color: '#ff3b3b' },
