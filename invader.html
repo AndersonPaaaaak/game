@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>인베이더</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;color:#fff;
+    font-family:"Courier New",Consolas,monospace;touch-action:none;user-select:none;-webkit-user-select:none}
+  #wrap{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+  canvas{display:block;image-rendering:pixelated;image-rendering:crisp-edges;background:#000;
+    box-shadow:0 0 40px rgba(57,255,20,.15)}
+  #touch{display:none;width:100%;max-width:672px;height:96px;box-sizing:border-box;padding:10px 14px;
+    justify-content:space-between;align-items:center;gap:12px}
+  #touch .grp{display:flex;gap:12px}
+  #touch button{width:76px;height:76px;border-radius:50%;border:2px solid #39ff14;background:rgba(57,255,20,.08);
+    color:#39ff14;font:bold 26px monospace;touch-action:none}
+  #touch button.fire{width:110px;border-radius:38px;font-size:20px}
+  #touch button.on{background:rgba(57,255,20,.35)}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+  <div id="touch">
+    <div class="grp">
+      <button id="bL">◀</button>
+      <button id="bR">▶</button>
+    </div>
+    <button id="bF" class="fire">발사</button>
+  </div>
+</div>
+<script>
+(() => {
+'use strict';
+// ───────── 기본 설정 ─────────
+const W = 672, H = 768, P = 3;            // 논리 해상도, 픽셀 1칸 크기
+const CELL = 48;                          // 외계인 격자 간격
+const PLAYER_Y = H - 120;
+const GROUND = H - 62;
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+cv.width = W; cv.height = H;
+ctx.imageSmoothingEnabled = false;
+
+const isTouch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+const touchBar = document.getElementById('touch');
+if (isTouch) touchBar.style.display = 'flex';
+
+function fit() {
+  const tb = isTouch ? 100 : 0;
+  const s = Math.min(innerWidth / W, (innerHeight - tb) / H);
+  cv.style.width = Math.floor(W * s) + 'px';
+  cv.style.height = Math.floor(H * s) + 'px';
+}
+addEventListener('resize', fit); fit();
+
+const rand = (a, b) => a + Math.random() * (b - a);
+const overlap = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+// ───────── 스프라이트 (오리지널 도트) ─────────
+const RAW = {
+  a: [[
+    "..X..X..",
+    "...XX...",
+    ".XXXXXX.",
+    "XX.XX.XX",
+    "XXXXXXXX",
+    "..X..X..",
+    ".X.XX.X.",
+    "X......X"],[
+    "..X..X..",
+    "X..XX..X",
+    "XXXXXXXX",
+    "XX.XX.XX",
+    ".XXXXXX.",
+    "..X..X..",
+    ".X....X.",
+    "..X..X.."]],
+  b: [[
+    "...XXXX...",
+    ".XXXXXXXX.",
+    "XX.XXXX.XX",
+    "XXXXXXXXXX",
+    ".X.X..X.X.",
+    "X.X....X.X",
+    "X........X",
+    ".X......X."],[
+    "...XXXX...",
+    ".XXXXXXXX.",
+    "XX.XXXX.XX",
+    "XXXXXXXXXX",
+    ".X.X..X.X.",
+    ".X.X..X.X.",
+    "..X....X..",
+    ".X......X."]],
+  c: [[
+    "....XXX....",
+    "..XXXXXXX..",
+    ".XXXXXXXXX.",
+    "XXX..X..XXX",
+    "XXXXXXXXXXX",
+    "..XX...XX..",
+    ".XX.XXX.XX.",
+    "XX.......XX"],[
+    "....XXX....",
+    "..XXXXXXX..",
+    ".XXXXXXXXX.",
+    "XXX..X..XXX",
+    "XXXXXXXXXXX",
+    "...X.X.X...",
+    "..X.X.X.X..",
+    "...X...X..."]],
+  player: [[
+    "......X......",
+    ".....XXX.....",
+    ".....XXX.....",
+    ".XXXXXXXXXXX.",
+    "XXXXXXXXXXXXX",
+    "XXXXXXXXXXXXX",
+    "XXXXXXXXXXXXX"]],
+  ufo: [[
+    ".....XXXXXX.....",
+    "...XXXXXXXXXX...",
+    "..XXXXXXXXXXXX..",
+    ".XX.XX.XX.XX.XX.",
+    "XXXXXXXXXXXXXXXX",
+    "..XXX..XX..XXX..",
+    "...X........X..."]],
+  boom: [[
+    ".X...X...X.",
+    "..X..X..X..",
+    "X..X...X..X",
+    "...........",
+    "XX.......XX",
+    "...........",
+    "X..X...X..X",
+    "..X..X..X..",
+    ".X...X...X."]]
+};
+function makeSprite(rows, color) {
+  const c = document.createElement('canvas');
+  c.width = rows[0].length * P; c.height = rows.length * P;
+  const g = c.getContext('2d'); g.fillStyle = color;
+  rows.forEach((r, y) => { for (let x = 0; x < r.length; x++) if (r[x] === 'X') g.fillRect(x * P, y * P, P, P); });
+  return c;
+}
+function sprite(name, color) {
+  const frames = RAW[name].map(f => makeSprite(f, color));
+  return { frames, w: frames[0].width, h: frames[0].height };
+}
+const ALIEN_TYPES = [
+  { spr: sprite('a', '#ff5ad8'), pts: 30 },
+  { spr: sprite('b', '#4fd8ff'), pts: 20 },
+  { spr: sprite('c', '#8dff4f'), pts: 10 }
+];
+const SPR_PLAYER = sprite('player', '#39ff14');
+const SPR_UFO = sprite('ufo', '#ff3b3b');
+const SPR_BOOM = sprite('boom', '#ffffff');
+
+// ───────── 사운드 (WebAudio) ─────────
+let ac = null, muted = false, ufoSound = null;
+function audioInit() {
+  if (!ac) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { ac = null; } }
+  if (ac && ac.state === 'suspended') ac.resume();
+}
+function tone(freq, dur, type = 'square', vol = 0.12, slideTo = 0) {
+  if (!ac || muted) return;
+  const t = ac.currentTime, o = ac.createOscillator(), g = ac.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(ac.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+function noise(dur, vol = 0.25, freq = 1200) {
+  if (!ac || muted) return;
+  const t = ac.currentTime, len = Math.floor(ac.sampleRate * dur);
+  const buf = ac.createBuffer(1, len, ac.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  const src = ac.createBufferSource(); src.buffer = buf;
+  const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = freq;
+  const g = ac.createGain(); g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(f).connect(g).connect(ac.destination); src.start(t);
+}
+const MARCH = [98, 87, 78, 73];
+const sfx = {
+  march(i) { tone(MARCH[i % 4], 0.09, 'square', 0.18); },
+  shoot() { tone(1200, 0.14, 'sawtooth', 0.07, 180); },
+  kill() { noise(0.18, 0.22, 2500); tone(500, 0.12, 'square', 0.05, 90); },
+  die() { noise(1.0, 0.35, 700); },
+  ufoHit() { for (let i = 0; i < 5; i++) setTimeout(() => tone(1400 - i * 180, 0.1, 'square', 0.08), i * 70); },
+  extra() { [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => tone(f, 0.12, 'square', 0.08), i * 90)); },
+  clear() { [392, 523, 659, 784].forEach((f, i) => setTimeout(() => tone(f, 0.16, 'triangle', 0.15), i * 120)); }
+};
+function ufoSoundStart() {
+  if (!ac || muted || ufoSound) return;
+  const o = ac.createOscillator(), lfo = ac.createOscillator(), lg = ac.createGain(), g = ac.createGain();
+  o.type = 'square'; o.frequency.value = 520; lfo.frequency.value = 7; lg.gain.value = 140; g.gain.value = 0.035;
+  lfo.connect(lg).connect(o.frequency); o.connect(g).connect(ac.destination);
+  o.start(); lfo.start(); ufoSound = { o, lfo };
+}
+function ufoSoundStop() {
+  if (!ufoSound) return;
+  try { ufoSound.o.stop(); ufoSound.lfo.stop(); } catch (e) {}
+  ufoSound = null;
+}
+
+// ───────── 최고점수 저장 ─────────
+function loadHi() { try { return parseInt(localStorage.getItem('invader_hi') || '0', 10) || 0; } catch (e) { return 0; } }
+function saveHi() { try { localStorage.setItem('invader_hi', String(hi)); } catch (e) {} }
+
+// ───────── 게임 상태 ─────────
+let state = 'title', stateT = 0;
+let score = 0, hi = loadHi(), lives = 3, level = 1, extraGiven = false;
+let aliens = [], fx = 0, fy = 0, dir = 1, anim = 0, stepAcc = 0, marchIdx = 0;
+const player = { x: W / 2, alive: true, deadT: 0 };
+let pBullet = null, aBullets = [], effects = [], shields = [];
+let ufo = null, ufoTimer = 0, fireAcc = 0, time = 0;
+
+function resetLevel() {
+  aliens = [];
+  for (let r = 0; r < 5; r++)
+    for (let c = 0; c < 11; c++)
+      aliens.push({ r, c, type: r === 0 ? 0 : r < 3 ? 1 : 2, alive: true });
+  fx = (W - 11 * CELL) / 2;
+  fy = 150 + Math.min(level - 1, 6) * 22;
+  dir = 1; anim = 0; stepAcc = 0; marchIdx = 0;
+  pBullet = null; aBullets = []; effects = [];
+  ufo = null; ufoSoundStop(); ufoTimer = rand(16, 26); fireAcc = 0;
+  player.x = W / 2; player.alive = true; player.deadT = 0;
+  buildShields();
+}
+function newGame() {
+  score = 0; lives = 3; level = 1; extraGiven = false;
+  resetLevel(); state = 'playing'; stateT = 0;
+}
+
+// ───────── 방어벽 ─────────
+const SH_W = 22, SH_H = 16;
+function buildShields() {
+  shields = [];
+  for (let i = 0; i < 4; i++) {
+    const cells = [];
+    for (let y = 0; y < SH_H; y++) {
+      const row = [];
+      for (let x = 0; x < SH_W; x++) {
+        let solid = true;
+        if (x + y < 4 || (SH_W - 1 - x) + y < 4) solid = false;          // 위쪽 모서리
+        if (y >= 10 && x >= 7 && x <= 14) solid = false;                  // 아래 아치
+        if (y === 9 && x >= 8 && x <= 13) solid = false;
+        row.push(solid);
+      }
+      cells.push(row);
+    }
+    shields.push({ x: Math.round(W * (i + 1) / 5 - SH_W * P / 2), y: PLAYER_Y - 96, cells });
+  }
+}
+function shieldHit(rect) {
+  for (const s of shields) {
+    const sb = { x: s.x, y: s.y, w: SH_W * P, h: SH_H * P };
+    if (!overlap(rect, sb)) continue;
+    const x0 = Math.max(0, Math.floor((rect.x - s.x) / P)), x1 = Math.min(SH_W - 1, Math.floor((rect.x + rect.w - 1 - s.x) / P));
+    const y0 = Math.max(0, Math.floor((rect.y - s.y) / P)), y1 = Math.min(SH_H - 1, Math.floor((rect.y + rect.h - 1 - s.y) / P));
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++)
+      if (s.cells[y][x]) return { s, cx: x, cy: y };
+  }
+  return null;
+}
+function damageShield(hit, dy) {
+  const { s } = hit, cx = hit.cx, cy = hit.cy + dy;
+  for (let y = -3; y <= 3; y++) for (let x = -3; x <= 3; x++) {
+    const tx = cx + x, ty = cy + y;
+    if (tx < 0 || ty < 0 || tx >= SH_W || ty >= SH_H) continue;
+    const d = Math.hypot(x, y);
+    if (d <= 1.5 || (d <= 3.2 && Math.random() < 0.45)) s.cells[ty][tx] = false;
+  }
+}
+function eraseShieldRect(rect) {
+  for (const s of shields) {
+    const sb = { x: s.x, y: s.y, w: SH_W * P, h: SH_H * P };
+    if (!overlap(rect, sb)) continue;
+    for (let y = 0; y < SH_H; y++) for (let x = 0; x < SH_W; x++) {
+      const c = { x: s.x + x * P, y: s.y + y * P, w: P, h: P };
+      if (overlap(rect, c)) s.cells[y][x] = false;
+    }
+  }
+}
+
+// ───────── 외계인 ─────────
+function alienRect(a) {
+  const s = ALIEN_TYPES[a.type].spr;
+  return { x: Math.round(fx + a.c * CELL + (CELL - s.w) / 2), y: Math.round(fy + a.r * CELL), w: s.w, h: s.h };
+}
+const aliveAliens = () => aliens.filter(a => a.alive);
+function stepAliens() {
+  const alive = aliveAliens();
+  if (!alive.length) return;
+  let left = Infinity, right = -Infinity;
+  for (const a of alive) { const r = alienRect(a); left = Math.min(left, r.x); right = Math.max(right, r.x + r.w); }
+  const dx = 6;
+  if ((dir > 0 && right + dx > W - 12) || (dir < 0 && left - dx < 12)) { fy += 24; dir = -dir; }
+  else fx += dx * dir;
+  anim ^= 1;
+  sfx.march(marchIdx++);
+  let bottom = 0;
+  for (const a of alive) { const r = alienRect(a); bottom = Math.max(bottom, r.y + r.h); eraseShieldRect(r); }
+  if (bottom >= PLAYER_Y) {                 // 침공 성공 → 게임 오버
+    lives = 0; killPlayer();
+  }
+}
+function alienFire() {
+  const alive = aliveAliens();
+  if (!alive.length) return;
+  const cols = {};
+  for (const a of alive) if (!cols[a.c] || cols[a.c].r < a.r) cols[a.c] = a;
+  const list = Object.values(cols);
+  let shooter;
+  if (Math.random() < 0.4) {                // 플레이어 근처 열 조준
+    shooter = list.reduce((best, a) => {
+      const r = alienRect(a), d = Math.abs(r.x + r.w / 2 - player.x);
+      return !best || d < best.d ? { a, d } : best;
+    }, null).a;
+  } else shooter = list[Math.floor(Math.random() * list.length)];
+  const r = alienRect(shooter);
+  aBullets.push({ x: r.x + r.w / 2 - 1.5, y: r.y + r.h, w: 3, h: 21, kind: Math.random() < 0.5 ? 0 : 1 });
+}
+
+// ───────── 플레이어 ─────────
+function playerRect() { return { x: Math.round(player.x - SPR_PLAYER.w / 2), y: PLAYER_Y, w: SPR_PLAYER.w, h: SPR_PLAYER.h }; }
+function killPlayer() {
+  if (!player.alive) return;
+  player.alive = false; player.deadT = 0;
+  aBullets = []; pBullet = null;
+  ufo = null; ufoSoundStop();
+  sfx.die();
+}
+function addScore(n) {
+  score += n;
+  if (!extraGiven && score >= 1500) { extraGiven = true; lives++; sfx.extra(); }
+  if (score > hi) { hi = score; saveHi(); }
+}
+
+// ───────── 입력 ─────────
+const keys = { left: false, right: false, fire: false };
+const KEYMAP = { ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right', Space: 'fire', ArrowUp: 'fire', KeyW: 'fire' };
+addEventListener('keydown', e => {
+  audioInit();
+  const k = KEYMAP[e.code];
+  if (k) { keys[k] = true; e.preventDefault(); }
+  if (e.code === 'Enter' || e.code === 'Space') startOrRestart();
+  if (e.code === 'KeyP' || e.code === 'Escape') togglePause();
+  if (e.code === 'KeyM') { muted = !muted; if (muted) ufoSoundStop(); else if (ufo) ufoSoundStart(); }
+});
+addEventListener('keyup', e => { const k = KEYMAP[e.code]; if (k) { keys[k] = false; e.preventDefault(); } });
+addEventListener('blur', () => { keys.left = keys.right = keys.fire = false; if (state === 'playing') togglePause(); });
+
+function startOrRestart() {
+  if (state === 'title') newGame();
+  else if (state === 'gameover' && stateT > 1.0) newGame();
+  else if (state === 'paused') togglePause();
+}
+function togglePause() {
+  if (state === 'playing') { state = 'paused'; ufoSoundStop(); }
+  else if (state === 'paused') { state = 'playing'; if (ufo) ufoSoundStart(); }
+}
+cv.addEventListener('pointerdown', () => { audioInit(); startOrRestart(); });
+
+function bindBtn(id, k) {
+  const b = document.getElementById(id);
+  const on = e => { e.preventDefault(); audioInit(); keys[k] = true; b.classList.add('on'); if (k === 'fire') startOrRestart(); };
+  const off = e => { e.preventDefault(); keys[k] = false; b.classList.remove('on'); };
+  b.addEventListener('touchstart', on, { passive: false });
+  b.addEventListener('touchend', off, { passive: false });
+  b.addEventListener('touchcancel', off, { passive: false });
+  b.addEventListener('mousedown', on); b.addEventListener('mouseup', off); b.addEventListener('mouseleave', off);
+}
+bindBtn('bL', 'left'); bindBtn('bR', 'right'); bindBtn('bF', 'fire');
+
+// ───────── 업데이트 ─────────
+function update(dt) {
+  time += dt; stateT += dt;
+  for (const e of effects) e.t -= dt;
+  effects = effects.filter(e => e.t > 0);
+
+  if (state === 'clear') {
+    if (stateT > 2.2) { level++; resetLevel(); state = 'playing'; stateT = 0; }
+    return;
+  }
+  if (state !== 'playing') return;
+
+  // 플레이어 사망 연출 중에는 외계인 정지
+  if (!player.alive) {
+    player.deadT += dt;
+    if (player.deadT > 1.6) {
+      lives--;
+      if (lives <= 0) { lives = 0; state = 'gameover'; stateT = 0; }
+      else { player.alive = true; player.x = W / 2; }
+    }
+    return;
+  }
+
+  // 이동
+  const speed = 250;
+  if (keys.left) player.x -= speed * dt;
+  if (keys.right) player.x += speed * dt;
+  player.x = Math.max(SPR_PLAYER.w / 2 + 12, Math.min(W - SPR_PLAYER.w / 2 - 12, player.x));
+
+  // 발사 (화면에 한 발만)
+  if (keys.fire && !pBullet) {
+    pBullet = { x: Math.round(player.x) - 1.5, y: PLAYER_Y - 12, w: 3, h: 12 };
+    sfx.shoot();
+  }
+
+  // 플레이어 총알 (3px 단위로 쪼개서 충돌 검사)
+  if (pBullet) {
+    let dist = 640 * dt;
+    while (dist > 0 && pBullet) {
+      const st = Math.min(3, dist); dist -= st; pBullet.y -= st;
+      if (pBullet.y < 80) { effects.push({ kind: 'spark', x: pBullet.x, y: 82, t: 0.2, color: '#ff3b3b' }); pBullet = null; break; }
+      // 외계인 명중
+      for (const a of aliens) {
+        if (!a.alive) continue;
+        const r = alienRect(a);
+        if (overlap(pBullet, r)) {
+          a.alive = false; addScore(ALIEN_TYPES[a.type].pts); sfx.kill();
+          effects.push({ kind: 'boom', x: r.x + r.w / 2, y: r.y + r.h / 2, t: 0.25 });
+          pBullet = null; break;
+        }
+      }
+      if (!pBullet) break;
+      // UFO 명중
+      if (ufo && overlap(pBullet, { x: ufo.x, y: ufo.y, w: SPR_UFO.w, h: SPR_UFO.h })) {
+        const pts = [50, 100, 150, 300][Math.random() < 0.12 ? 3 : Math.floor(Math.random() * 3)];
+        addScore(pts); sfx.ufoHit();
+        effects.push({ kind: 'text', x: ufo.x + SPR_UFO.w / 2, y: ufo.y + 18, t: 1.2, text: String(pts), color: '#ff3b3b' });
+        ufo = null; ufoSoundStop(); ufoTimer = rand(18, 28);
+        pBullet = null; break;
+      }
+      // 외계인 총알과 상쇄
+      for (let i = 0; i < aBullets.length; i++) {
+        if (overlap(pBullet, aBullets[i])) {
+          effects.push({ kind: 'spark', x: pBullet.x, y: pBullet.y, t: 0.15, color: '#fff' });
+          if (Math.random() < 0.6) aBullets.splice(i, 1);
+          pBullet = null; break;
+        }
+      }
+      if (!pBullet) break;
+      // 방어벽
+      const h = shieldHit(pBullet);
+      if (h) { damageShield(h, -1); pBullet = null; }
+    }
+  }
+
+  // 외계인 행진 (남은 수가 적을수록 빨라짐)
+  const alive = aliveAliens().length;
+  const interval = Math.max(16, 14 + alive * 12) * (1 - Math.min(level - 1, 6) * 0.05);
+  stepAcc += dt * 1000;
+  while (stepAcc >= interval && player.alive) { stepAcc -= interval; stepAliens(); }
+  if (!player.alive) return;
+
+  // 외계인 사격
+  fireAcc += dt;
+  const fireEvery = Math.max(0.32, 0.95 - (level - 1) * 0.07);
+  const maxShots = Math.min(6, 3 + Math.floor((level - 1) / 2));
+  if (fireAcc >= fireEvery) { fireAcc = 0; if (aBullets.length < maxShots) alienFire(); }
+
+  // 외계인 총알 이동
+  const bSpeed = 230 + Math.min(level - 1, 8) * 18;
+  const pr = playerRect();
+  for (let i = aBullets.length - 1; i >= 0; i--) {
+    const b = aBullets[i];
+    let dist = bSpeed * dt, gone = false;
+    while (dist > 0 && !gone) {
+      const st = Math.min(3, dist); dist -= st; b.y += st;
+      if (b.y + b.h >= GROUND) { effects.push({ kind: 'spark', x: b.x, y: GROUND - 6, t: 0.2, color: '#39ff14' }); gone = true; break; }
+      const h = shieldHit(b);
+      if (h) { damageShield(h, 1); gone = true; break; }
+      if (overlap(b, pr)) { gone = true; killPlayer(); break; }
+    }
+    if (gone) aBullets.splice(i, 1);
+    if (!player.alive) return;
+  }
+
+  // UFO
+  if (ufo) {
+    ufo.x += ufo.dir * 135 * dt;
+    if (ufo.x > W + 60 || ufo.x < -SPR_UFO.w - 60) { ufo = null; ufoSoundStop(); ufoTimer = rand(18, 28); }
+  } else if (alive >= 8) {
+    ufoTimer -= dt;
+    if (ufoTimer <= 0) {
+      const d = Math.random() < 0.5 ? 1 : -1;
+      ufo = { dir: d, x: d > 0 ? -SPR_UFO.w : W, y: 92 };
+      ufoSoundStart();
+    }
+  }
+
+  // 라운드 클리어
+  if (alive === 0) { state = 'clear'; stateT = 0; ufo = null; ufoSoundStop(); aBullets = []; pBullet = null; sfx.clear(); }
+}
+
+// ───────── 그리기 ─────────
+function text(str, x, y, size = 22, color = '#fff', align = 'center') {
+  ctx.font = `bold ${size}px "Courier New", Consolas, monospace`;
+  ctx.textAlign = align; ctx.textBaseline = 'middle'; ctx.fillStyle = color;
+  ctx.fillText(str, x, y);
+}
+const pad = n => String(n).padStart(5, '0');
+
+function drawHUD() {
+  text('점수', 30, 30, 18, '#aaa', 'left');
+  text(pad(score), 30, 56, 26, '#fff', 'left');
+  text('최고점수', W / 2, 30, 18, '#aaa');
+  text(pad(hi), W / 2, 56, 26, '#ffd23f');
+  text('라운드', W - 30, 30, 18, '#aaa', 'right');
+  text(String(level), W - 30, 56, 26, '#fff', 'right');
+  ctx.fillStyle = '#39ff14'; ctx.fillRect(0, GROUND, W, 3);
+  text(String(lives), 30, GROUND + 34, 24, '#fff', 'left');
+  for (let i = 0; i < Math.min(lives - 1, 6); i++) ctx.drawImage(SPR_PLAYER.frames[0], 64 + i * 52, GROUND + 22);
+  text(muted ? 'M:소리 꺼짐' : 'M:소리', W - 24, GROUND + 34, 16, '#666', 'right');
+}
+
+function drawGame() {
+  // 방어벽
+  ctx.fillStyle = '#39ff14';
+  for (const s of shields)
+    for (let y = 0; y < SH_H; y++) for (let x = 0; x < SH_W; x++)
+      if (s.cells[y][x]) ctx.fillRect(s.x + x * P, s.y + y * P, P, P);
+
+  // 외계인
+  for (const a of aliens) {
+    if (!a.alive) continue;
+    const r = alienRect(a), s = ALIEN_TYPES[a.type].spr;
+    ctx.drawImage(s.frames[anim], r.x, r.y);
+  }
+
+  // UFO
+  if (ufo) ctx.drawImage(SPR_UFO.frames[0], Math.round(ufo.x), ufo.y);
+
+  // 플레이어
+  if (player.alive) {
+    const r = playerRect();
+    ctx.drawImage(SPR_PLAYER.frames[0], r.x, r.y);
+  } else {
+    const r = playerRect();
+    ctx.fillStyle = '#39ff14';
+    const f = Math.floor(player.deadT * 10) % 2;
+    for (let i = 0; i < 26; i++) {
+      const px = r.x + Math.floor(Math.random() * 15 - 1) * P;
+      const py = r.y + Math.floor(Math.random() * 8) * P + (f ? 0 : P);
+      ctx.fillRect(px, py, P, P);
+    }
+  }
+
+  // 총알
+  if (pBullet) { ctx.fillStyle = '#fff'; ctx.fillRect(pBullet.x, pBullet.y, pBullet.w, pBullet.h); }
+  for (const b of aBullets) {
+    ctx.fillStyle = '#fff';
+    const ph = Math.floor(time * 16) % 2;
+    if (b.kind === 0) {                      // 지그재그
+      for (let i = 0; i < 7; i++) {
+        const off = ((i + ph) % 2) ? -P : P;
+        ctx.fillRect(b.x + off, b.y + i * P, P, P);
+      }
+    } else {                                 // 십자형
+      ctx.fillRect(b.x, b.y, P, b.h);
+      ctx.fillRect(b.x - P, b.y + (ph ? 6 : 12), P * 3, P);
+    }
+  }
+
+  // 효과
+  for (const e of effects) {
+    if (e.kind === 'boom') ctx.drawImage(SPR_BOOM.frames[0], Math.round(e.x - SPR_BOOM.w / 2), Math.round(e.y - SPR_BOOM.h / 2));
+    else if (e.kind === 'spark') {
+      ctx.fillStyle = e.color;
+      for (let i = 0; i < 6; i++) ctx.fillRect(e.x + Math.floor(Math.random() * 7 - 3) * P, e.y + Math.floor(Math.random() * 5 - 2) * P, P, P);
+    } else if (e.kind === 'text') text(e.text, e.x, e.y, 22, e.color);
+  }
+}
+
+function drawTitle() {
+  const fr = Math.abs(Math.floor(time * 2)) % 2;
+  const blink = fr === 0;
+  text('인베이더', W / 2, 170, 72, '#39ff14');
+  text('INVADERS', W / 2, 228, 22, '#4fd8ff');
+  const rows = [
+    { img: SPR_UFO.frames[0], label: '= ? 미스터리', color: '#ff3b3b' },
+    { img: ALIEN_TYPES[0].spr.frames[fr], label: '= 30 점', color: '#ff5ad8' },
+    { img: ALIEN_TYPES[1].spr.frames[fr], label: '= 20 점', color: '#4fd8ff' },
+    { img: ALIEN_TYPES[2].spr.frames[fr], label: '= 10 점', color: '#8dff4f' }
+  ];
+  text('— 점수표 —', W / 2, 300, 22, '#fff');
+  rows.forEach((r, i) => {
+    const y = 350 + i * 52;
+    ctx.drawImage(r.img, Math.round(W / 2 - 110 - r.img.width / 2), Math.round(y - r.img.height / 2));
+    text(r.label, W / 2 - 50, y, 24, r.color, 'left');
+  });
+  if (blink) text(isTouch ? '화면을 터치해서 시작' : 'ENTER 를 눌러 시작', W / 2, 590, 26, '#ffd23f');
+  text(isTouch ? '◀ ▶ 이동   발사 버튼: 쏘기' : '← → / A D 이동   SPACE 발사', W / 2, 640, 18, '#aaa');
+  text(isTouch ? '' : 'P 일시정지   M 소리 켜기/끄기', W / 2, 668, 18, '#aaa');
+}
+
+function overlay(title, sub, color) {
+  ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(0, H / 2 - 90, W, 180);
+  text(title, W / 2, H / 2 - 24, 48, color);
+  if (sub) text(sub, W / 2, H / 2 + 34, 20, '#fff');
+}
+
+function draw() {
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  if (state === 'title') { drawHUD(); drawTitle(); return; }
+  drawHUD();
+  drawGame();
+  if (state === 'paused') overlay('일시정지', 'P 또는 ENTER 로 계속', '#ffd23f');
+  else if (state === 'clear') overlay(`라운드 ${level} 클리어!`, '다음 침공이 다가옵니다…', '#39ff14');
+  else if (state === 'gameover') {
+    overlay('GAME OVER', stateT > 1 && Math.floor(time * 2) % 2 === 0 ? (isTouch ? '터치해서 다시 시작' : 'ENTER 로 다시 시작') : '', '#ff3b3b');
+  }
+}
+
+// ───────── 루프 ─────────
+resetLevel();
+let last = performance.now();
+function loop(t) {
+  const dt = Math.max(0, Math.min(0.05, (t - last) / 1000)); last = t;
+  update(dt); draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
